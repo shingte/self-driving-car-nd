@@ -107,12 +107,12 @@ I paid special attention to left and right turns, open space to exit, and road c
 
 These are some example of the data collected -
 
-* Let and right turns -
+* Left and right turns -
 
 ![alt text][image10]
 ![alt text][image11]
 
-* Bridge and open space -
+* Bridge and open space to exit -
 
 ![alt text][image12]
 ![alt text][image13]
