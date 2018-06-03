@@ -4,16 +4,20 @@ import csv
 import os
 import math
 import pandas
+import random
 
 import numpy as np
 import tensorflow as tf
 import keras # Use Keras 2.x version
 from keras import losses
-from keras.models import Sequential
+from keras.models import Sequential, load_model
 from keras.layers import Dense, Flatten, Dropout, Lambda, Conv2D, MaxPooling2D, Cropping2D
 from keras.layers.advanced_activations import ELU
+from keras import regularizers
+from keras.regularizers import l2
 from sklearn.utils import shuffle
 from sklearn.model_selection import train_test_split
+from keras.callbacks import ModelCheckpoint
 import matplotlib.pyplot as plt
 
 
@@ -64,7 +68,7 @@ def process_img_to_show(image, angle, pred_angle, frame):
 
 """
 Load data and store in memory
-"""
+
 def load_data(dir):
 	samples = []
 	with open(dir+'driving_log.csv') as csvfile:
@@ -76,6 +80,8 @@ def load_data(dir):
 	return samples
 	#train_samples, validation_samples = train_test_split(samples, test_size=args.split_ratio)
 	#return train_samples, validation_samples
+"""
+
 
 """
 Preprocess data for data balancing
@@ -90,23 +96,35 @@ def process_data(dir):
 	data = pandas.read_csv(csvpath, skiprows=args.skip_lines, names=colnames)
 	paths = data.center.tolist()
 	steerings = data.steering.tolist()
-	steerings_left = [min(x+correction, 1) for x in steerings]
-	steerings_right = [max(x-correction, -1) for x in steerings]
+	#steerings_left = [min(x+correction, 1) for x in steerings]
+	#steerings_right = [max(x-correction, -1) for x in steerings]
 	
 	# add left and right camera images to list with steering correction
-	paths.extend(data.left.tolist())
-	steerings.extend(steerings_left)
+	# paths.extend(data.left.tolist())
+	# steerings.extend(steerings_left)
+	# paths.extend(data.right.tolist())
+	# steerings.extend(steerings_right)
+
+	#For steering>flip_threshold (right turn), add left camera image to center list with steering+correction
+	#For steering<-flip_threshold (left turn), add right camera image to center list with steering-correction
+
+	left  = data.left.tolist()
+	right = data.right.tolist()
+	for i in range(len(left)):  	
+		if (steerings[i] > args.flip_threshold):	# right turn
+			paths.append(left[i])
+			steerings.append(steerings[i]+args.correction)
+		if (steerings[i] < -args.flip_threshold):	# left turn
+			paths.append(right[i])
+			steerings.append(steerings[i]-args.correction)
 	
-	paths.extend(data.right.tolist())
-	steerings.extend(steerings_right)
+	
 	
 	for i in range(len(paths)):
 		paths[i] = dir+paths[i].strip().replace('\\', '/')
 
-	print('# of images=', len(paths))
-	print('# of steerings=', len(steerings))
-	print(paths[0])
-	print(paths[-1])
+	print('# of images =', len(paths))
+	print('# of steerings =', len(steerings))
 
 	return paths, steerings
 	
@@ -115,24 +133,35 @@ Create 21 bins for steering angles -1 to 1.
 bin 10 is for angle 0 only
 """
 def create_bins(paths, steerings, rebalance, plot_histogram=True):
-	n_bins = 21
+	num_bins = 23
+	avg_n_per_bin = len(steerings)/num_bins
+	hist, bins = np.histogram(steerings, num_bins)
+	width = 0.7 * (bins[1] - bins[0])
+	center = (bins[:-1] + bins[1:]) / 2
+	
+	"""
+	n_bins = 31
 	hist = [0] * n_bins  # [[] for i in range(21)]
 	
 	for j in range(len(steerings)):
 		steer=steerings[j]
 		idx = get_bin(steer)
 		hist[idx] += 1
-
+	"""
 	if plot_histogram:
-		show_histogram(hist)
+		#show_histogram(hist)
+		plt.bar(center, hist, align='center', width=width)
+		plt.plot((np.min(steerings), np.max(steerings)), (avg_n_per_bin, avg_n_per_bin), 'k-')
+		plt.show()
 
 	if rebalance:
-		paths, steerings = delete_samples(paths, steerings, hist)
+		paths, steerings = delete_samples(paths, steerings, hist, bins, num_bins)
 		if plot_histogram:
 			create_bins(paths, steerings, False, plot_histogram)
 			
 	return paths, steerings
 	
+"""
 def get_bin(steering):
 	if abs(steering) < 1.0e-7:
 		bin = 10
@@ -151,14 +180,35 @@ def show_histogram(hist):
 	plt.show()
 
 	return
+"""
 
-def delete_samples(paths, steerings, hist):
+def delete_samples(paths, steerings, hist, bins, num_bins):
+	keep_probs = []
+	avg_n_per_bin = len(steerings)/num_bins
+	target = avg_n_per_bin * 1.0
+	for i in range(num_bins):
+		if hist[i] < target:
+			keep_probs.append(1.)
+		else:
+			keep_probs.append(1./(hist[i]/target))
+
+	remove_list = []
+	for i in range(len(steerings)):
+		for j in range(num_bins):
+			if steerings[i] >= bins[j] and steerings[i] <= bins[j+1]:
+				# delete from X and y with probability 1 - keep_probs[j]
+				if np.random.rand() > keep_probs[j]:
+					remove_list.append(i)
+	paths = np.delete(paths, remove_list, axis=0)
+	steerings = np.delete(steerings, remove_list)
+
+	"""
 	n_bins = len(hist)
 	n_samples = len(steerings)
 	delete_list = []
 	delete_probs = [0.0] * n_bins
 	avg_num_in_bin = n_samples / n_bins
-	target = avg_num_in_bin # * 0.5
+	target = avg_num_in_bin * 0.5
 	for i in range(n_bins):
 		if hist[i] > target:
 			delete_probs[i] = 1 - target / hist[i]
@@ -170,7 +220,7 @@ def delete_samples(paths, steerings, hist):
 	
 	paths = np.delete(paths, delete_list)
 	steerings = np.delete(steerings, delete_list)
-
+	"""
 	return paths, steerings
 
 
@@ -180,7 +230,7 @@ Load images from center, left, right cameras,
 Convert from BGR2RGB - cv2 read in BGR, drive.py takes RGB format
 Corrections on steering values for left/right cameeas.
 """
-def process_samples(image_paths, steerings):
+def process_samples(image_paths, steerings, train):
 	#correct the steering for images from left(+) and right(-)
 	#correction = args.correction
 	images = []
@@ -195,9 +245,23 @@ def process_samples(image_paths, steerings):
 		# It's very important to do BGR2RGB, as drive.py takes RGB image format
 		image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # BGR2YUV)  
 		# crop and resize to 64x64x3
-		# image = image[60:140, 0:320] # cv2.resize(image[60:140,:], (64,64))
+		image = image[60:140,:,:] # 0:320] # cv2.resize(image[60:140,:], (64,64))
+		image = cv2.resize(image,(200, 66), interpolation = cv2.INTER_AREA)
 		# show_cv2('crop', image)
+
+		# randomly flip
+		"""
+		if abs(steerings[i]) >= args.flip_threshold:
+			if random.randint(0,1)==1:
+				steerings[i] *= 1.0
+				image = cv2.flip(image, 1)
+		"""
+
 		images.append(image)
+
+		# if it's training mode, randomly jitter on sterring angles
+		#if (train):
+		#	steerings[i] = steerings[i]*(1+ np.random.uniform(-0.10,0.10))
 
 	if args.debug:
 		show_dataset(images, steerings)
@@ -211,7 +275,7 @@ def flip_images(images, steerings):
 	add_images = []
 	add_steerings = []
 	for image, angle in zip(images, steerings):
-		if angle < args.flip_threshold: 
+		if abs(angle) < args.flip_threshold: 
 			continue
 		add_images.append(image)
 		add_steerings.append(angle)
@@ -229,16 +293,24 @@ def flip_images(images, steerings):
 Generate the required images and steerings for training/validation
 samples is a list of pairs (image_path, steering).
 """
-def generator(X_samples, y_samples, batch_size=32):
+def generator(X_samples, y_samples, train, batch_size=32):
     num_samples = len(X_samples)
  
     while True: # Loop forever so the generator never terminates
         X_samples, y_samples = shuffle(X_samples, y_samples)
         for offset in range(0, num_samples, batch_size):
-            X_batch = X_samples[offset:offset+batch_size]
-            y_batch = y_samples[offset:offset+batch_size]
-            X, y = process_samples(X_batch, y_batch)
-            yield shuffle(X, y)
+        	"""
+        	X_batch = []
+        	y_batch = []
+        	idx = random.sample(range(num_samples), batch_size)
+        	for i in idx:
+        		X_batch.append(X_samples[i])
+        		y_batch.append(y_samples[i])
+        	"""
+        	X_batch = X_samples[offset:offset+batch_size]
+        	y_batch = y_samples[offset:offset+batch_size]
+        	X, y = process_samples(X_batch, y_batch, train)
+        	yield shuffle(X, y)
 
 """
 Get one of the following models -
@@ -252,8 +324,8 @@ Preprocessing -
 def get_model():
 	default_model=args.default_model
 	model = Sequential()
-	model.add(Lambda(lambda x: x/255.0 - 0.5, input_shape = (160,320,3))) #(64,64,3)))
-	model.add(Cropping2D(cropping=((70,20),(0,0))))
+	model.add(Lambda(lambda x: x/255.0 - 0.5, input_shape = (66, 200, 3))) # (160,320,3))) #(64,64,3)))
+	#model.add(Cropping2D(cropping=((70,20),(0,0))))
 	if (default_model==2):
 		return commaai_model(model)
 	elif (default_model==3):
@@ -302,15 +374,19 @@ Nvidia End to End Self-driving Car CNN model
 """
 def nvidia_model(model):
 	print('nvidia_model used')
-	model.add(Conv2D(24, (5, 5), activation='relu', strides=(2, 2)))
-	model.add(Conv2D(36, (5, 5), activation='relu', strides=(2, 2)))
-	model.add(Conv2D(48, (5, 5), activation='relu', strides=(2, 2)))
-	model.add(Conv2D(64, (3, 3), activation='relu'))
-	model.add(Conv2D(64, (3, 3), activation='relu'))
+	model.add(Conv2D(24, (5, 5), activation='elu', strides=(2, 2), kernel_regularizer=regularizers.l2(0.001)))
+	model.add(Conv2D(36, (5, 5), activation='elu', strides=(2, 2), kernel_regularizer=regularizers.l2(0.001)))
+	model.add(Conv2D(48, (5, 5), activation='elu', strides=(2, 2), kernel_regularizer=regularizers.l2(0.001)))
+	model.add(Conv2D(64, (3, 3), activation='elu', kernel_regularizer=regularizers.l2(0.001)))
+	model.add(Conv2D(64, (3, 3), activation='elu', kernel_regularizer=regularizers.l2(0.001)))
+	# model.add(Dropout(args.keep_prob))
 	model.add(Flatten())
 	model.add(Dense(100))
+	model.add(Dropout(args.keep_prob))
 	model.add(Dense(50))
+	model.add(Dropout(args.keep_prob))
 	model.add(Dense(10))
+	model.add(Dropout(args.keep_prob))
 	model.add(Dense(1))
 	return model
 
@@ -335,24 +411,34 @@ def train_model(): #X_train, y_train):
 	config.gpu_options.allow_growth = True
 	sess= tf.Session(config=config)
 
-	model = get_model()
-	print(model.summary())
+	
+	# checkpoint
+	filepath='model.best.h5'
+	checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+	callbacks_list = [checkpoint]
 
-	model.compile(loss=args.loss, optimizer='adam')
+
+	if args.load_model_path != ' ':
+		model = load_model(args.load_model_path)
+	else:
+		model = get_model()
+		model.compile(loss=args.loss, optimizer='adam')
+
+	print(model.summary())
 	if args.use_generator:
 		train_X, validation_X, train_y, validation_y = train_test_split(paths, steerings, test_size=args.split_ratio)
 		print('Train samples: {}'.format(len(train_X)))
 		print('Validation samples: {}'.format(len(validation_X)))
 		batch_size=args.batch_size
-		train_generator = generator(train_X, train_y, batch_size)
-		validation_generator = generator(validation_X, validation_y, batch_size)
-		model.fit_generator(train_generator, steps_per_epoch= len(train_X)/batch_size,
+		train_generator = generator(train_X, train_y, True, batch_size)
+		validation_generator = generator(validation_X, validation_y, False, batch_size)
+		history = model.fit_generator(train_generator, steps_per_epoch= len(train_X)/batch_size,
 							validation_data=validation_generator, validation_steps=len(validation_X)/batch_size, 
-							epochs=args.epochs, verbose = 1)
+							epochs=args.epochs, verbose = 1, callbacks=callbacks_list)
 	else:
 		X_train, y_train = process_samples(paths, steerings)
-		model.fit(X_train, y_train, validation_split=args.split_ratio, shuffle=True, 
-					batch_size=args.batch_size, epochs=args.epochs)
+		history = model.fit(X_train, y_train, validation_split=args.split_ratio, shuffle=True, 
+					batch_size=args.batch_size, epochs=args.epochs, callbacks=callbacks_list)
 
 
 	model.save('model.h5')
@@ -372,18 +458,19 @@ parameters and defaults setting
 """
 def set_args():
     parser = argparse.ArgumentParser(description='Build and train Behavioral Cloning Model')
-    parser.add_argument('-d', help='data directory', dest='data_dir', type=str, default='./data/')
+    parser.add_argument('-d', help='data directory', dest='data_dir', type=str, default='./d_all2/')
     parser.add_argument('-e', help='extra data directory', dest='data_dir2', type=str, default=' ')
-    parser.add_argument('-s', help='# of lines to skip in csv file', dest='skip_lines', type=int, default=1)
+    parser.add_argument('-s', help='# of lines to skip in csv file', dest='skip_lines', type=int, default=0)
+    parser.add_argument('-p', help='load model path', dest='load_model_path', type=str, default='model.h5')
     parser.add_argument('-u', help='use lane info (Y/n)', dest='use_lane_info', type=s2b, default='n')
     parser.add_argument('-g', help='use data generator (y/N)', dest='use_generator', type=s2b, default='y')
-    parser.add_argument('-r', help='rebalance data (y/N)', dest='rebalance', type=s2b, default='n')
-    parser.add_argument('-c', help='steering correction', dest='correction', type=float, default=0.2)
-    parser.add_argument('-f', help='flip threshold', dest='flip_threshold', type=float, default=0)
-    parser.add_argument('-m', help='model: 1=Nvidia, 2=CommaAi, 3=LeNet', dest='default_model',    type=int,   default=1)
+    parser.add_argument('-r', help='rebalance data (y/N)', dest='rebalance', type=s2b, default='y')
+    parser.add_argument('-c', help='steering correction', dest='correction', type=float, default=0.1)
+    parser.add_argument('-f', help='flip threshold', dest='flip_threshold', type=float, default=0.1)
+    parser.add_argument('-m', help='model: 1=Nvidia, 2=CommaAi, 3=LeNet', dest='default_model',type=int,default=1)
     parser.add_argument('-t', help='train/validation split ratio', dest='split_ratio', type=float, default=0.2)
-    parser.add_argument('-k', help='keep probability', dest='keep_prob', type=float, default=0.5)
-    parser.add_argument('-n', help='number of epochs', dest='epochs', type=int, default=10)
+    parser.add_argument('-k', help='keep probability', dest='keep_prob', type=float, default=0.5 )
+    parser.add_argument('-n', help='number of epochs', dest='epochs', type=int, default=100) # 50)
     parser.add_argument('-b', help='batch size', dest='batch_size', type=int, default=128)
     parser.add_argument('-l', help='loss function', dest='loss', type=str, default='mse')
     parser.add_argument('-z', help='debug mode (y/N)', dest='debug', type=s2b, default='n')
